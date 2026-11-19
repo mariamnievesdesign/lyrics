@@ -9,8 +9,7 @@ namespace Letras;
 
 public partial class MainWindow : Window
 {
-    const double CornerRadiusPx = 22;
-    const double DimOpacity = 0.38;
+    const double DimOpacity = 0.45;
     const double DimScale = 0.93;
     static readonly TimeSpan Lead = TimeSpan.FromMilliseconds(150); // Muestra cada línea un pelín antes, se siente más natural.
 
@@ -31,9 +30,11 @@ public partial class MainWindow : Window
         InitializeComponent();
         ApplySettings();
 
-        SourceInitialized += (_, _) => { Glass.Enable(this); Glass.UpdateRegion(this, CornerRadiusPx); };
-        SizeChanged += (_, _) => Glass.UpdateRegion(this, CornerRadiusPx);
-        DpiChanged += (_, _) => Glass.UpdateRegion(this, CornerRadiusPx);
+        SourceInitialized += (_, _) =>
+        {
+            // Si este Windows no tiene vidrio acrílico, usamos un fondo oscuro sólido para que la letra se lea.
+            if (!Glass.Enable(this)) Card.Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x18, 0x18, 0x20));
+        };
         Loaded += async (_, _) => { await _media.StartAsync(); _timer.Start(); };
         Closing += (_, _) => SaveSettings();
 
