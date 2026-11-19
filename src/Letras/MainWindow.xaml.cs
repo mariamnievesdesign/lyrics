@@ -42,7 +42,11 @@ public partial class MainWindow : Window
         MouseLeftButtonDown += (_, e) => { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); };
         MouseEnter += (_, _) => Fade(ControlsPanel, 1);
         MouseLeave += (_, _) => Fade(ControlsPanel, 0);
-        Viewport.SizeChanged += (_, _) => ScrollToCurrent(animate: false);
+        Viewport.SizeChanged += (_, _) =>
+        {
+            LinesPanel.Width = Viewport.ActualWidth;
+            ScrollToCurrent(animate: false);
+        };
         Viewport.MouseWheel += Viewport_MouseWheel;
 
         ShowStatus("Esperando música… ♪");
