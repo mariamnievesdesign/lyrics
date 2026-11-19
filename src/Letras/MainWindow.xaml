@@ -79,7 +79,9 @@
                                 Click="Smaller_Click" ToolTip="Letra más pequeña" />
                         <Button Style="{StaticResource GlassButton}" Content="A" FontSize="14"
                                 Click="Bigger_Click" ToolTip="Letra más grande" />
-                        <Button Style="{StaticResource GlassButton}" Content="✕" Margin="10,0,0,0"
+                        <Button Style="{StaticResource GlassButton}" Content="◐" FontSize="13" Margin="10,0,0,0"
+                                Click="Glass_Click" ToolTip="Transparencia del fondo" />
+                        <Button Style="{StaticResource GlassButton}" Content="✕" Margin="3,0,0,0"
                                 Click="Close_Click" ToolTip="Cerrar" />
                     </StackPanel>
                 </Grid>

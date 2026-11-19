@@ -33,7 +33,7 @@ public partial class MainWindow : Window
         SourceInitialized += (_, _) =>
         {
             // Si este Windows no tiene vidrio acrílico, usamos un fondo oscuro sólido para que la letra se lea.
-            if (!Glass.Enable(this)) Card.Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x18, 0x18, 0x20));
+            if (!Glass.Enable(this, _settings.GlassLevel)) Card.Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x18, 0x18, 0x20));
         };
         Loaded += async (_, _) => { await _media.StartAsync(); _timer.Start(); };
         Closing += (_, _) => SaveSettings();
@@ -280,6 +280,12 @@ public partial class MainWindow : Window
         _settings.FontSize = Math.Clamp(_settings.FontSize + delta, 14, 48);
         foreach (TextBlock tb in LinesPanel.Children) tb.FontSize = _settings.FontSize;
         Dispatcher.InvokeAsync(() => ScrollToCurrent(animate: false), DispatcherPriority.Loaded);
+    }
+
+    void Glass_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.GlassLevel = (_settings.GlassLevel + 1) % Glass.Levels.Length;
+        Glass.SetTint(this, _settings.GlassLevel);
     }
 
     void Close_Click(object sender, RoutedEventArgs e) => Close();

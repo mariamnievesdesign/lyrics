@@ -40,7 +40,8 @@ static class Glass
     const int WCA_ACCENT_POLICY = 19;
     const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4;
     const int ACCENT_FLAG_USE_TINT = 2;
-    const uint Tint = 0x8C1E1618; // ~55 % de un gris violáceo muy oscuro
+    /// <summary>Niveles de tinte (opacidad del oscurecido), de más transparente a más oscuro.</summary>
+    public static readonly byte[] Levels = { 0x12, 0x30, 0x58, 0x88 };
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
@@ -52,7 +53,7 @@ static class Glass
     static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
 
     /// <summary>Activa el vidrio. Devuelve false si este Windows no lo soporta.</summary>
-    public static bool Enable(Window window)
+    public static bool Enable(Window window, int level)
     {
         var hwnd = new WindowInteropHelper(window).Handle;
         var source = HwndSource.FromHwnd(hwnd);
@@ -73,25 +74,36 @@ static class Glass
             var margins = new Margins { Left = -1, Right = -1, Top = -1, Bottom = -1 };
             DwmExtendFrameIntoClientArea(hwnd, ref margins);
 
-            var accent = new AccentPolicy
-            {
-                AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND,
-                AccentFlags = ACCENT_FLAG_USE_TINT,
-                GradientColor = Tint,
-            };
-            var size = Marshal.SizeOf(accent);
-            var ptr = Marshal.AllocHGlobal(size);
-            try
-            {
-                Marshal.StructureToPtr(accent, ptr, false);
-                var data = new WindowCompositionAttributeData { Attribute = WCA_ACCENT_POLICY, Data = ptr, SizeOfData = size };
-                return SetWindowCompositionAttribute(hwnd, ref data) != 0;
-            }
-            finally { Marshal.FreeHGlobal(ptr); }
+            return SetTint(window, level);
         }
         catch
         {
             return false;
         }
+    }
+
+    /// <summary>Cambia qué tan oscuro es el vidrio. level: índice en Levels.</summary>
+    public static bool SetTint(Window window, int level)
+    {
+        var hwnd = new WindowInteropHelper(window).Handle;
+        if (hwnd == IntPtr.Zero) return false;
+
+        var alpha = (uint)Levels[Math.Clamp(level, 0, Levels.Length - 1)];
+        var accent = new AccentPolicy
+        {
+            AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND,
+            AccentFlags = ACCENT_FLAG_USE_TINT,
+            GradientColor = (alpha << 24) | 0x001E1618, // AABBGGRR: gris violáceo muy oscuro
+        };
+        var size = Marshal.SizeOf(accent);
+        var ptr = Marshal.AllocHGlobal(size);
+        try
+        {
+            Marshal.StructureToPtr(accent, ptr, false);
+            var data = new WindowCompositionAttributeData { Attribute = WCA_ACCENT_POLICY, Data = ptr, SizeOfData = size };
+            return SetWindowCompositionAttribute(hwnd, ref data) != 0;
+        }
+        catch { return false; }
+        finally { Marshal.FreeHGlobal(ptr); }
     }
 }

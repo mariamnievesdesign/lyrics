@@ -12,6 +12,7 @@ public sealed class Settings
     public double Height { get; set; } = 260;
     public double OffsetSeconds { get; set; }
     public double FontSize { get; set; } = 22;
+    public int GlassLevel { get; set; } = 1;
 
     static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Letras", "settings.json");
