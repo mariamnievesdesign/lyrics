@@ -1,22 +1,46 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Threading;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using Microsoft.UI;
+using Microsoft.UI.Composition;
+using Microsoft.UI.Composition.SystemBackdrops;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Text;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Windows.Foundation;
+using Windows.Graphics;
+using WinRT;
+using WinRT.Interop;
 
 namespace Letras;
 
-public partial class MainWindow : Window
+public sealed partial class MainWindow : Window
 {
-    const double DimOpacity = 0.45;
+    const double DimOpacity = 0.5;
     const double DimScale = 0.93;
     static readonly TimeSpan Lead = TimeSpan.FromMilliseconds(150); // Muestra cada línea un pelín antes, se siente más natural.
+
+    // Niveles de transparencia: (opacidad del tinte, opacidad de luminosidad). De más transparente a más oscuro.
+    static readonly (float Tint, float Luminosity)[] GlassLevels =
+    {
+        (0.00f, 0.10f),
+        (0.15f, 0.35f),
+        (0.35f, 0.60f),
+        (0.60f, 0.85f),
+    };
 
     readonly MediaWatcher _media = new();
     readonly LyricsService _lyrics = new();
     readonly Settings _settings = Settings.Load();
-    readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(120) };
+    readonly DispatcherQueueTimer _timer;
+    readonly IntPtr _hwnd;
+
+    DesktopAcrylicController? _acrylic;
+    SystemBackdropConfiguration? _backdropConfig;
 
     string? _trackKey;
     List<LrcLine> _lines = new();
@@ -24,32 +48,142 @@ public partial class MainWindow : Window
     int _current = -2;
     bool _busy;
     CancellationTokenSource? _lookup;
+    Storyboard? _scrollAnim;
 
     public MainWindow()
     {
         InitializeComponent();
-        ApplySettings();
+        _hwnd = WindowNative.GetWindowHandle(this);
 
-        SourceInitialized += (_, _) =>
-        {
-            // Si este Windows no tiene vidrio acrílico, usamos un fondo oscuro sólido para que la letra se lea.
-            if (!Glass.Enable(this, _settings.GlassLevel)) Card.Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x18, 0x18, 0x20));
-        };
-        Loaded += async (_, _) => { await _media.StartAsync(); _timer.Start(); };
-        Closing += (_, _) => SaveSettings();
+        SetupWindow();
+        SetupAcrylic();
+        UpdateOffsetText();
 
-        _timer.Tick += (_, _) => Tick();
-        MouseLeftButtonDown += (_, e) => { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); };
-        MouseEnter += (_, _) => Fade(ControlsPanel, 1);
-        MouseLeave += (_, _) => Fade(ControlsPanel, 0);
+        Root.PointerPressed += Root_PointerPressed;
+        Root.PointerEntered += (_, _) => Animate(ControlsPanel, "Opacity", 1, 200);
+        Root.PointerExited += (_, _) => Animate(ControlsPanel, "Opacity", 0, 200);
         Viewport.SizeChanged += (_, _) =>
         {
             LinesPanel.Width = Viewport.ActualWidth;
+            Viewport.Clip = new RectangleGeometry { Rect = new Rect(0, 0, Viewport.ActualWidth, Viewport.ActualHeight) };
             ScrollToCurrent(animate: false);
         };
-        Viewport.MouseWheel += Viewport_MouseWheel;
+        Viewport.PointerWheelChanged += Viewport_PointerWheelChanged;
+        Closed += (_, _) =>
+        {
+            _settings.Save();
+            _acrylic?.Dispose();
+            _acrylic = null;
+        };
 
         ShowStatus("Esperando música… ♪");
+
+        _timer = DispatcherQueue.CreateTimer();
+        _timer.Interval = TimeSpan.FromMilliseconds(120);
+        _timer.Tick += (_, _) => Tick();
+        _ = StartAsync();
+    }
+
+    async Task StartAsync()
+    {
+        await _media.StartAsync();
+        _timer.Start();
+    }
+
+    // ---------------- Ventana ----------------
+
+    void SetupWindow()
+    {
+        var appWindow = AppWindow;
+        appWindow.Title = "Letras";
+
+        if (appWindow.Presenter is OverlappedPresenter p)
+        {
+            p.IsAlwaysOnTop = true;
+            p.IsMaximizable = false;
+            p.IsMinimizable = false;
+            p.IsResizable = true;
+            p.SetBorderAndTitleBar(true, false); // Borde para redimensionar, sin barra de título.
+        }
+
+        // Esquinas redondeadas (Windows 11).
+        var corner = 2; // DWMWCP_ROUND
+        DwmSetWindowAttribute(_hwnd, 33, ref corner, sizeof(int));
+
+        var scale = GetDpiForWindow(_hwnd) / 96.0;
+        var w = Math.Max(_settings.W ?? 0, (int)(260 * scale));
+        var h = Math.Max(_settings.H ?? 0, (int)(150 * scale));
+        if (_settings.W == null) { w = (int)(420 * scale); h = (int)(260 * scale); }
+
+        int x, y;
+        if (_settings.X is int sx && _settings.Y is int sy &&
+            DisplayArea.GetFromPoint(new PointInt32(sx + 40, sy + 40), DisplayAreaFallback.None) != null)
+        {
+            x = sx;
+            y = sy;
+        }
+        else
+        {
+            // Primera vez: esquina inferior derecha, sobre la barra de tareas.
+            var work = DisplayArea.GetFromWindowId(appWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+            x = work.X + work.Width - w - (int)(24 * scale);
+            y = work.Y + work.Height - h - (int)(24 * scale);
+        }
+        appWindow.MoveAndResize(new RectInt32(x, y, w, h));
+
+        appWindow.Changed += (s, e) =>
+        {
+            if (!e.DidPositionChange && !e.DidSizeChange) return;
+            _settings.X = s.Position.X;
+            _settings.Y = s.Position.Y;
+            _settings.W = s.Size.Width;
+            _settings.H = s.Size.Height;
+        };
+    }
+
+    // Arrastrar la ventana desde cualquier parte (los botones no lo activan porque manejan su propio clic).
+    void Root_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(Root).Properties.IsLeftButtonPressed) return;
+        ReleaseCapture();
+        SendMessage(_hwnd, 0x00A1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero);
+    }
+
+    // ---------------- Vidrio acrílico ----------------
+
+    void SetupAcrylic()
+    {
+        if (!DesktopAcrylicController.IsSupported())
+        {
+            Root.Background = new SolidColorBrush(ColorHelper.FromArgb(0xF2, 0x18, 0x16, 0x1E));
+            return;
+        }
+
+        // IsInputActive = true siempre: así Windows NO cambia el vidrio por un color sólido
+        // cuando la ventana pierde el foco (que es casi siempre, porque estás usando otra app).
+        _backdropConfig = new SystemBackdropConfiguration
+        {
+            IsInputActive = true,
+            Theme = SystemBackdropTheme.Dark,
+        };
+
+        _acrylic = new DesktopAcrylicController { Kind = DesktopAcrylicKind.Thin };
+        ApplyGlassLevel();
+        _acrylic.AddSystemBackdropTarget(this.As<ICompositionSupportsSystemBackdrop>());
+        _acrylic.SetSystemBackdropConfiguration(_backdropConfig);
+
+        // Por si Windows intenta reactivar el estado "inactivo".
+        Activated += (_, _) => { if (_backdropConfig != null) _backdropConfig.IsInputActive = true; };
+    }
+
+    void ApplyGlassLevel()
+    {
+        if (_acrylic == null) return;
+        var (tint, lum) = GlassLevels[Math.Clamp(_settings.GlassLevel, 0, GlassLevels.Length - 1)];
+        _acrylic.TintColor = ColorHelper.FromArgb(0xFF, 0x18, 0x16, 0x1E);
+        _acrylic.TintOpacity = tint;
+        _acrylic.LuminosityOpacity = lum;
+        _acrylic.FallbackColor = ColorHelper.FromArgb(0xF2, 0x18, 0x16, 0x1E);
     }
 
     // ---------------- Ciclo principal ----------------
@@ -136,10 +270,11 @@ public partial class MainWindow : Window
 
         foreach (var line in lines)
         {
+            var scale = synced ? DimScale : 1;
             var tb = new TextBlock
             {
                 Text = string.IsNullOrWhiteSpace(line.Text) ? "♪" : line.Text,
-                Foreground = Brushes.White,
+                Foreground = new SolidColorBrush(Colors.White),
                 FontSize = _settings.FontSize,
                 FontWeight = FontWeights.SemiBold,
                 TextAlignment = TextAlignment.Center,
@@ -147,7 +282,7 @@ public partial class MainWindow : Window
                 Margin = new Thickness(0, 5, 0, 5),
                 Opacity = synced ? DimOpacity : 0.9,
                 RenderTransformOrigin = new Point(0.5, 0.5),
-                RenderTransform = new ScaleTransform(synced ? DimScale : 1, synced ? DimScale : 1),
+                RenderTransform = new ScaleTransform { ScaleX = scale, ScaleY = scale },
             };
             LinesPanel.Children.Add(tb);
         }
@@ -157,7 +292,7 @@ public partial class MainWindow : Window
             ResetScroll(0);
             return;
         }
-        Dispatcher.InvokeAsync(() => ScrollToCurrent(animate: false), DispatcherPriority.Loaded);
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ScrollToCurrent(animate: false));
     }
 
     void ClearLines()
@@ -192,15 +327,12 @@ public partial class MainWindow : Window
     {
         if (index < 0 || index >= LinesPanel.Children.Count) return;
         var tb = (TextBlock)LinesPanel.Children[index];
-        var dur = TimeSpan.FromMilliseconds(350);
-        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-
-        tb.BeginAnimation(OpacityProperty, new DoubleAnimation(active ? 1 : DimOpacity, dur) { EasingFunction = ease });
+        Animate(tb, "Opacity", active ? 1 : DimOpacity, 350);
         if (tb.RenderTransform is ScaleTransform st)
         {
-            var scale = active ? 1 : DimScale;
-            st.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(scale, dur) { EasingFunction = ease });
-            st.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(scale, dur) { EasingFunction = ease });
+            var s = active ? 1 : DimScale;
+            Animate(st, "ScaleX", s, 350);
+            Animate(st, "ScaleY", s, 350);
         }
     }
 
@@ -211,27 +343,44 @@ public partial class MainWindow : Window
         var tb = (FrameworkElement)LinesPanel.Children[i];
 
         LinesPanel.UpdateLayout();
-        var center = tb.TranslatePoint(new Point(0, tb.ActualHeight / 2), LinesPanel).Y;
+        var center = tb.TransformToVisual(LinesPanel).TransformPoint(new Point(0, tb.ActualHeight / 2)).Y;
         var target = Viewport.ActualHeight * 0.42 - center;
 
         if (!animate) { ResetScroll(target); return; }
-        Scroll.BeginAnimation(TranslateTransform.YProperty,
-            new DoubleAnimation(target, TimeSpan.FromMilliseconds(450))
-            { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+        _scrollAnim = Animate(Scroll, "Y", target, 450);
     }
 
     void ResetScroll(double y)
     {
-        Scroll.BeginAnimation(TranslateTransform.YProperty, null);
+        _scrollAnim?.Stop();
+        _scrollAnim = null;
         Scroll.Y = y;
     }
 
     // Con letra sin sincronizar, la rueda del mouse permite recorrerla.
-    void Viewport_MouseWheel(object sender, MouseWheelEventArgs e)
+    void Viewport_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         if (_synced || LinesPanel.Children.Count == 0) return;
+        var delta = e.GetCurrentPoint(Viewport).Properties.MouseWheelDelta;
         var min = Math.Min(0, Viewport.ActualHeight - LinesPanel.ActualHeight - 20);
-        ResetScroll(Math.Clamp(Scroll.Y + e.Delta * 0.4, min, 0));
+        ResetScroll(Math.Clamp(Scroll.Y + delta * 0.4, min, 0));
+    }
+
+    static Storyboard Animate(DependencyObject target, string property, double to, int ms)
+    {
+        var anim = new DoubleAnimation
+        {
+            To = to,
+            Duration = new Duration(TimeSpan.FromMilliseconds(ms)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(anim, target);
+        Storyboard.SetTargetProperty(anim, property);
+        var sb = new Storyboard();
+        sb.Children.Add(anim);
+        sb.Begin();
+        return sb;
     }
 
     // ---------------- Encabezado y estado ----------------
@@ -253,9 +402,6 @@ public partial class MainWindow : Window
 
     void HideStatus() => StatusText.Visibility = Visibility.Collapsed;
 
-    static void Fade(UIElement el, double to) =>
-        el.BeginAnimation(OpacityProperty, new DoubleAnimation(to, TimeSpan.FromMilliseconds(200)));
-
     // ---------------- Controles ----------------
 
     void Earlier_Click(object sender, RoutedEventArgs e) => ChangeOffset(-0.5);
@@ -270,7 +416,7 @@ public partial class MainWindow : Window
 
     void UpdateOffsetText() =>
         OffsetText.Text = (_settings.OffsetSeconds > 0 ? "+" : "") +
-                          _settings.OffsetSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s";
+                          _settings.OffsetSeconds.ToString("0.0", CultureInfo.InvariantCulture) + " s";
 
     void Smaller_Click(object sender, RoutedEventArgs e) => ChangeFont(-2);
     void Bigger_Click(object sender, RoutedEventArgs e) => ChangeFont(+2);
@@ -278,50 +424,30 @@ public partial class MainWindow : Window
     void ChangeFont(double delta)
     {
         _settings.FontSize = Math.Clamp(_settings.FontSize + delta, 14, 48);
-        foreach (TextBlock tb in LinesPanel.Children) tb.FontSize = _settings.FontSize;
-        Dispatcher.InvokeAsync(() => ScrollToCurrent(animate: false), DispatcherPriority.Loaded);
+        foreach (var child in LinesPanel.Children)
+            if (child is TextBlock tb) tb.FontSize = _settings.FontSize;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ScrollToCurrent(animate: false));
     }
 
     void Glass_Click(object sender, RoutedEventArgs e)
     {
-        _settings.GlassLevel = (_settings.GlassLevel + 1) % Glass.Levels.Length;
-        Glass.SetTint(this, _settings.GlassLevel);
+        _settings.GlassLevel = (_settings.GlassLevel + 1) % GlassLevels.Length;
+        ApplyGlassLevel();
     }
 
     void Close_Click(object sender, RoutedEventArgs e) => Close();
 
-    // ---------------- Preferencias ----------------
+    // ---------------- Win32 ----------------
 
-    void ApplySettings()
-    {
-        Width = Math.Max(MinWidth, _settings.Width);
-        Height = Math.Max(MinHeight, _settings.Height);
+    [DllImport("user32.dll")]
+    static extern bool ReleaseCapture();
 
-        var screen = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
-                              SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
-        WindowStartupLocation = WindowStartupLocation.Manual;
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
 
-        if (_settings.Left is double l && _settings.Top is double t && screen.Contains(new Point(l + 40, t + 40)))
-        {
-            Left = l;
-            Top = t;
-        }
-        else
-        {
-            // Primera vez: esquina inferior derecha, sobre la barra de tareas.
-            var work = SystemParameters.WorkArea;
-            Left = work.Right - Width - 24;
-            Top = work.Bottom - Height - 24;
-        }
-        UpdateOffsetText();
-    }
+    [DllImport("user32.dll")]
+    static extern uint GetDpiForWindow(IntPtr hwnd);
 
-    void SaveSettings()
-    {
-        _settings.Left = Left;
-        _settings.Top = Top;
-        _settings.Width = ActualWidth;
-        _settings.Height = ActualHeight;
-        _settings.Save();
-    }
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 }
