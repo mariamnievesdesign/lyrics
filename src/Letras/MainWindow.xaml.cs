@@ -47,6 +47,7 @@ public sealed partial class MainWindow : Window
     bool _synced;
     int _current = -2;
     bool _busy;
+    int _ticks;
     CancellationTokenSource? _lookup;
     Storyboard? _scrollAnim;
 
@@ -99,11 +100,11 @@ public sealed partial class MainWindow : Window
 
         if (appWindow.Presenter is OverlappedPresenter p)
         {
-            p.IsAlwaysOnTop = true;
             p.IsMaximizable = false;
             p.IsMinimizable = false;
             p.IsResizable = true;
             p.SetBorderAndTitleBar(true, false); // Borde para redimensionar, sin barra de título.
+            p.IsAlwaysOnTop = true; // Después de quitar la barra, que puede reiniciar este ajuste.
         }
 
         // Esquinas redondeadas (Windows 11).
@@ -149,6 +150,12 @@ public sealed partial class MainWindow : Window
         SendMessage(_hwnd, 0x00A1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero);
     }
 
+    void KeepOnTop()
+    {
+        if (AppWindow.Presenter is OverlappedPresenter p && p.State == OverlappedPresenterState.Minimized) return;
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
     // ---------------- Vidrio acrílico ----------------
 
     void SetupAcrylic()
@@ -190,6 +197,9 @@ public sealed partial class MainWindow : Window
 
     async void Tick()
     {
+        // Cada ~1 s se vuelve a poner encima de todo (otras apps "siempre encima" pueden taparla).
+        if (_ticks++ % 8 == 0) KeepOnTop();
+
         if (_busy) return;
         _busy = true;
         try
@@ -444,6 +454,12 @@ public sealed partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    static readonly IntPtr HWND_TOPMOST = new(-1);
+    const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010, SWP_NOOWNERZORDER = 0x0200;
+
+    [DllImport("user32.dll")]
+    static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll")]
     static extern uint GetDpiForWindow(IntPtr hwnd);
